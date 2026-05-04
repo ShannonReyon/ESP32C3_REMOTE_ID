@@ -1,21 +1,31 @@
 #include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEAdvertising.h>
 
-uint32_t counter = 0;
+BLEAdvertising *pAdvertising;
 
 void setup()
 {
     Serial.begin(115200);
     delay(1000);
 
-    Serial.println();
-    Serial.println("XIAO ESP32-C3 Remote ID Project");
-    Serial.println("v0.1 Serial heartbeat test");
+    Serial.println("v0.2 BLE name advertising");
+
+    // Initialize BLE
+    BLEDevice::init("XIAO-RID-TEST");
+
+    // Get advertising object
+    pAdvertising = BLEDevice::getAdvertising();
+
+    // Start advertising
+    pAdvertising->start();
+
+    Serial.println("BLE advertising started");
 }
 
 void loop()
 {
-    Serial.print("Heartbeat: ");
-    Serial.println(counter++);
 
     delay(1000);
 }
