@@ -3,119 +3,124 @@
 #include <BLEUtils.h>
 #include <BLEAdvertising.h>
 
+extern "C" {
+#include "opendroneid.h"
+}
+
 BLEAdvertising *pAdvertising;
 
-// Example drone data for v0.4 custom payload test
-uint32_t droneID = 1001;
-double latitude = 52.2749000;
-double longitude = 10.5234000;
-uint16_t altitude_m = 120;
-float speed_mps = 5.25;
-float heading_deg = 90.50;
+ODID_BasicID_data basicID;
+ODID_Location_data locationData;
+ODID_System_data systemData;
 
-// Status flags
-bool armed = true;
-bool flying = true;
-bool gpsFix = true;
-bool emergencyState = false;
-bool lowBattery = false;
-bool failsafe = false;
+uint8_t odidCounter = 0;
 
-uint8_t sequenceCounter = 0;
-
-void writeUint16LE(uint8_t *buffer, int index, uint16_t value)
+void buildBasicID()
 {
-    buffer[index] = value & 0xFF;
-    buffer[index + 1] = (value >> 8) & 0xFF;
+    memset(&basicID, 0, sizeof(basicID));
+
+    // Basic ID identifies the drone.
+    basicID.IDType = ODID_IDTYPE_SERIAL_NUMBER;
+    basicID.UAType = ODID_UATYPE_HELICOPTER_OR_MULTIROTOR;
+    strncpy((char *)basicID.UASID, "TESTDRONE123", ODID_ID_SIZE);
 }
 
-void writeUint32LE(uint8_t *buffer, int index, uint32_t value)
+void buildLocation()
 {
-    buffer[index] = value & 0xFF;
-    buffer[index + 1] = (value >> 8) & 0xFF;
-    buffer[index + 2] = (value >> 16) & 0xFF;
-    buffer[index + 3] = (value >> 24) & 0xFF;
+    memset(&locationData, 0, sizeof(locationData));
+
+    // Fixed test location for v0.5.
+    // Later, GNSS will replace these values.
+    locationData.Status = ODID_STATUS_AIRBORNE;
+    locationData.Direction = 90.0;
+    locationData.SpeedHorizontal = 5.0;
+    locationData.SpeedVertical = 0.0;
+    locationData.Latitude = 52.2749;
+    locationData.Longitude = 10.5234;
+    locationData.AltitudeBaro = 100.0;
+    locationData.AltitudeGeo = 100.0;
+    locationData.HeightType = ODID_HEIGHT_REF_OVER_TAKEOFF;
+    locationData.Height = 100.0;
+    locationData.HorizAccuracy = ODID_HOR_ACC_10_METER;
+    locationData.VertAccuracy = ODID_VER_ACC_10_METER;
+    locationData.BaroAccuracy = ODID_VER_ACC_10_METER;
+    locationData.SpeedAccuracy = ODID_SPEED_ACC_3_METERS_PER_SECOND;
+    locationData.TSAccuracy = ODID_TIME_ACC_1_0_SECOND;
+    locationData.TimeStamp = 0;
 }
 
-void writeInt32LE(uint8_t *buffer, int index, int32_t value)
+void buildSystem()
 {
-    buffer[index] = value & 0xFF;
-    buffer[index + 1] = (value >> 8) & 0xFF;
-    buffer[index + 2] = (value >> 16) & 0xFF;
-    buffer[index + 3] = (value >> 24) & 0xFF;
+    memset(&systemData, 0, sizeof(systemData));
+
+    // For this fixed test, we use the same coordinates as operator/takeoff location.
+    systemData.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_TAKEOFF;
+    systemData.ClassificationType = ODID_CLASSIFICATION_TYPE_EU;
+    systemData.OperatorLatitude = 52.2749;
+    systemData.OperatorLongitude = 10.5234;
+    systemData.AreaCount = 1;
+    systemData.AreaRadius = 0;
+    systemData.AreaCeiling = 120;
+    systemData.AreaFloor = 0;
+    systemData.OperatorAltitudeGeo = 100.0;
+    systemData.Timestamp = 0;
 }
 
-uint8_t buildStatusFlags()
+void advertiseOpenDroneIDMessage(uint8_t *encodedMessage)
 {
-    uint8_t flags = 0;
+    uint8_t adv[31] = {0};
 
-    if (armed) flags |= (1 << 0);
-    if (flying) flags |= (1 << 1);
-    if (gpsFix) flags |= (1 << 2);
-    if (emergencyState) flags |= (1 << 3);
-    if (lowBattery) flags |= (1 << 4);
-    if (failsafe) flags |= (1 << 5);
+    // BLE Service Data advertisement for OpenDroneID:
+    // [Length][AD Type][UUID LSB][UUID MSB][ODID App Code][Counter][25-byte ODID message]
+    // 0x1E = 30 bytes after the length byte.
+    // 0x16 = Service Data - 16-bit UUID.
+    // 0xFFFA = ASTM Remote ID / OpenDroneID service UUID, little-endian as FA FF.
+    // 0x0D = OpenDroneID application code.
+    adv[0] = 0x1E;
+    adv[1] = 0x16;
+    adv[2] = 0xFA;
+    adv[3] = 0xFF;
+    adv[4] = 0x0D;
+    adv[5] = odidCounter++;
 
-    return flags;
-}
+    memcpy(&adv[6], encodedMessage, ODID_MESSAGE_SIZE);
 
-void updateAdvertisement()
-{
     BLEAdvertisementData advData;
-
-    // Important: do not add a BLE name here.
-    // The 24-byte manufacturer payload is too large to reliably fit together with a name.
-
-    // Manufacturer data total = 24 bytes:
-    // [0..1]   Company ID, dummy value 0x1234, little-endian
-    // [2]      Protocol Version
-    // [3]      Message Type
-    // [4..7]   Drone ID
-    // [8..11]  Latitude, int32, degrees * 1e7
-    // [12..15] Longitude, int32, degrees * 1e7
-    // [16..17] Altitude, uint16, meters
-    // [18..19] Speed, uint16, m/s * 100
-    // [20..21] Heading, uint16, degrees * 100
-    // [22]     Status flags
-    // [23]     Sequence counter
-    uint8_t mfgData[24] = {0};
-
-    mfgData[0] = 0x34;
-    mfgData[1] = 0x12;
-    mfgData[2] = 0x01;
-    mfgData[3] = 0x01;
-
-    int32_t lat_encoded = (int32_t)(latitude * 1e7);
-    int32_t lon_encoded = (int32_t)(longitude * 1e7);
-    uint16_t speed_encoded = (uint16_t)(speed_mps * 100.0f);
-    uint16_t heading_encoded = (uint16_t)(heading_deg * 100.0f);
-    uint8_t statusFlags = buildStatusFlags();
-
-    writeUint32LE(mfgData, 4, droneID);
-    writeInt32LE(mfgData, 8, lat_encoded);
-    writeInt32LE(mfgData, 12, lon_encoded);
-    writeUint16LE(mfgData, 16, altitude_m);
-    writeUint16LE(mfgData, 18, speed_encoded);
-    writeUint16LE(mfgData, 20, heading_encoded);
-    mfgData[22] = statusFlags;
-    mfgData[23] = sequenceCounter;
-
-    advData.setManufacturerData(std::string((char *)mfgData, sizeof(mfgData)));
+    advData.addData(std::string((char *)adv, 6 + ODID_MESSAGE_SIZE));
 
     pAdvertising->stop();
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
+}
 
-    Serial.println("Broadcasting v0.4 custom drone payload");
-    Serial.print("Drone ID: "); Serial.println(droneID);
-    Serial.print("Latitude: "); Serial.println(latitude, 7);
-    Serial.print("Longitude: "); Serial.println(longitude, 7);
-    Serial.print("Altitude: "); Serial.print(altitude_m); Serial.println(" m");
-    Serial.print("Speed: "); Serial.print(speed_mps); Serial.println(" m/s");
-    Serial.print("Heading: "); Serial.print(heading_deg); Serial.println(" deg");
-    Serial.print("Status flags: 0x"); Serial.println(statusFlags, HEX);
-    Serial.print("Sequence: "); Serial.println(sequenceCounter);
-    Serial.println();
+void broadcastNextMessage()
+{
+    uint8_t message[ODID_MESSAGE_SIZE] = {0};
+    uint8_t selector = odidCounter % 3;
+
+    if (selector == 0)
+    {
+        ODID_BasicID_encoded encoded{};
+        encodeBasicIDMessage(&encoded, &basicID);
+        memcpy(message, &encoded, ODID_MESSAGE_SIZE);
+        Serial.println("Broadcasting OpenDroneID BasicID");
+    }
+    else if (selector == 1)
+    {
+        ODID_Location_encoded encoded{};
+        encodeLocationMessage(&encoded, &locationData);
+        memcpy(message, &encoded, ODID_MESSAGE_SIZE);
+        Serial.println("Broadcasting OpenDroneID Location");
+    }
+    else
+    {
+        ODID_System_encoded encoded{};
+        encodeSystemMessage(&encoded, &systemData);
+        memcpy(message, &encoded, ODID_MESSAGE_SIZE);
+        Serial.println("Broadcasting OpenDroneID System");
+    }
+
+    advertiseOpenDroneIDMessage(message);
 }
 
 void setup()
@@ -124,26 +129,21 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("v0.4 Full custom drone payload broadcast");
+    Serial.println("v0.5 Fixed OpenDroneID BLE broadcaster");
 
     BLEDevice::init("");
     pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->setScanResponse(false);
+    pAdvertising->setMinInterval(0xA0); // 100 ms
+    pAdvertising->setMaxInterval(0xF0); // 150 ms
 
-    updateAdvertisement();
+    buildBasicID();
+    buildLocation();
+    buildSystem();
 }
 
 void loop()
 {
-    delay(1000);
-
-    // Simulate small movement east and heading change
-    longitude += 0.0000100;
-    heading_deg += 2.0;
-    if (heading_deg >= 360.0)
-    {
-        heading_deg -= 360.0;
-    }
-
-    sequenceCounter++;
-    updateAdvertisement();
+    broadcastNextMessage();
+    delay(150);
 }
